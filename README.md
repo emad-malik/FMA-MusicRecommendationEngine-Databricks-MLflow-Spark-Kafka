@@ -244,10 +244,6 @@ This enables:
 - Detailed error pages
 - Interactive debugger
 
-## License
-
-MIT License
-
 ## Support
 
 For issues related to:
