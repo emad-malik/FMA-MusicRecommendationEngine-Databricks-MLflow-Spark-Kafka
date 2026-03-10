@@ -1,59 +1,257 @@
-# FMA-MusicRecommendationEngine
-Phase 1: Capacity Planning (The Engineering Baseline)
-Before writing a single line of code, we need to define what the system must survive in production. Let us assume we are building a backend for a music platform where users can upload snippets of tracks to get instant genre tags.
+# Flask Music Recommendation UI
 
-Total Users: 50,000 Daily Active Users.
+A web-based music recommendation system powered by KMeans clustering on audio features extracted from music tracks. This Flask application integrates with Databricks for data access and MLflow for model serving.
 
-Concurrent Users: At peak hours, expect about 5% to be active, so around 2,500 concurrent connections.
+## Features
 
-Requests per User: Average of 5 requests per day.
+- 🎵 **Music Library Browser** - Browse and play music tracks organized by clusters
+- 🔊 **Audio Upload & Classification** - Upload audio files for real-time cluster prediction
+- 🤖 **AI-Powered Recommendations** - Get similar tracks based on audio feature clustering
+- ⭐ **Favorites Management** - Save and manage your favorite tracks
+- 📊 **Cluster Statistics** - View distribution of tracks across clusters
+- 🎨 **Modern UI** - Responsive design with drag-and-drop upload
 
-Total Throughput: 250,000 requests per day (roughly 3 to 10 requests per second at peak).
+## Architecture
 
-Payload Size: A 30-second MP3 snippet is roughly 1 MB. Peak ingress is about 10 MB/second.
+```
+User Browser
+    ↓
+Flask App (app.py)
+    ├── Databricks SQL Connector → Query gold/silver/bronze tables
+    ├── MLflow → Load KMeans model for predictions
+    ├── Librosa → Extract audio features (tempo, MFCC, spectral centroid)
+    └── AWS S3 → Serve audio files via presigned URLs
+```
 
-Latency Target: Under 800 milliseconds per user from upload to genre prediction.
+## Prerequisites
 
-Processing audio is incredibly CPU-intensive. Decoding an MP3, extracting the features (like MFCCs or spectrograms), and running a deep learning model inference takes time. If we rely on a basic web server, it will instantly bottleneck.
+1. **Python 3.10+** installed
+2. **Databricks Workspace** with:
+   - SQL Warehouse running
+   - Tables: `fma_catalog.bronze.audio_raw`, `fma_catalog.silver.audio_unsupervised`, `fma_catalog.gold.audio_clusters`
+   - MLflow model trained and registered
+3. **AWS S3** bucket with audio files
+4. **Access credentials** for Databricks and AWS
 
-Phase 2: Architectural Evolution
-Here is how the architecture scales from a basic concept to an enterprise-grade big data pipeline.
+## Installation
 
-Step 1: The Basic Monolith (Why it fails)
-You build a FastAPI endpoint. A user uploads an audio file, and the server decodes it using Librosa, runs the PyTorch or TensorFlow model, and returns the genre.
-With 10 concurrent users, the CPU maxes out. Request number 11 waits in a queue until it times out. This design is tightly coupled, blocks the main thread, and crashes under pressure.
+### 1. Clone and Navigate
 
-Step 2: Decoupling with Apache Kafka (Scalable Ingestion)
-To fix the bottleneck, we introduce an event-driven architecture.
+```bash
+cd flask-ui
+```
 
-The user uploads the audio to an S3 bucket (or local MinIO storage) and sends a lightweight request to the API with the file's ID.
+### 2. Create Virtual Environment (Recommended)
 
-The API instantly publishes a message to a Kafka topic named raw_audio_events and returns a "Processing" status to the user.
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
 
-Kafka acts as a massive shock absorber. Even if 1,000 users upload files simultaneously, Kafka holds the messages safely.
+### 3. Install Dependencies
 
-A pool of independent worker nodes subscribes to the Kafka topic, pulls the files, processes the audio, and pushes the genre prediction to a completed_predictions topic.
+```bash
+pip install -r ../fma-hybrid-pipeline/requirements.txt
+```
 
-The API is never blocked, and the system can handle massive traffic spikes seamlessly.
+### 4. Configure Environment Variables
 
-Step 3: Apache Spark for Big Data Processing (Scalable Compute)
-Kafka handles the real-time traffic, but what about the 93 GiB of historical data? You cannot preprocess 106,000 MP3 files on a single machine to train your initial model. It would take weeks.
+Create a `.env` file based on the template:
 
-This is where Apache Spark steps in.
+```bash
+cp .env.example .env
+```
 
-Batch Preprocessing: You write a Spark job that distributes the workload across a cluster of nodes. Spark reads the 93 GiB of MP3s from your storage, decodes them in parallel, extracts the Mel-spectrograms, and saves the engineered features back to storage in a highly optimized format like Parquet.
+Edit `.env` and fill in your credentials:
 
-Distributed Training: Spark MLlib or Spark's integration with deep learning frameworks can be used to train your genre classification model across the cluster, cutting training time from days to hours.
+```env
+# Databricks Configuration
+DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+DATABRICKS_ACCESS_TOKEN=dapi...your-token-here
+DATABRICKS_CATALOG=fma_catalog
 
-Phase 4: The Final MLOps Pipeline
-Now we tie it all together with the tools you are already mastering.
+# AWS S3 Configuration
+AWS_ACCESS_KEY_ID=your-aws-access-key
+AWS_SECRET_ACCESS_KEY=your-aws-secret-key
+S3_BUCKET_NAME=fma-data-bucket
 
-Continuous Integration (Jenkins): You push a new PySpark feature engineering script to GitHub. Jenkins catches the commit, runs unit tests to ensure your audio extraction logic is mathematically sound, and triggers the big data pipeline.
+# MLflow Configuration (optional - defaults to Databricks)
+MLFLOW_TRACKING_URI=databricks
+MLFLOW_MODEL_URI=models:/kmeans_music_clustering/Production
+```
 
-Model Training & Tracking (MLflow): Jenkins orchestrates the Spark cluster to train the new deep learning model. MLflow tracks every hyperparameter (like spectrogram window size or CNN dropout rates) and logs the heavy model artifacts.
+### 5. Get Databricks Credentials
 
-Champion vs. Challenger: Jenkins pulls the new model and compares its F1-score on a validation set against the current production model. If it wins, it is registered in MLflow.
+**Server Hostname & HTTP Path:**
+1. Go to your Databricks workspace
+2. Navigate to: **SQL Warehouses**
+3. Click on your warehouse
+4. Go to **Connection Details** tab
+5. Copy `Server hostname` and `HTTP path`
 
-Streaming Inference: Your Kafka consumer workers load the newly promoted model from MLflow into memory and begin processing the live stream of user uploads.
+**Access Token:**
+1. Go to: **Settings** → **User Settings** → **Developer** (or **Access Tokens**)
+2. Click **Generate New Token**
+3. Give it a name (e.g., "Flask App") and set expiration
+4. Copy the token (shown only once!)
 
+## Running the Application
 
+### Development Server
+
+```bash
+python run.py
+```
+
+The app will start on `http://localhost:5000`
+
+### Production Server (Gunicorn)
+
+```bash
+pip install gunicorn
+gunicorn -w 4 -b 0.0.0.0:5000 app:app
+```
+
+## Project Structure
+
+```
+flask-ui/
+├── app.py                      # Main Flask application with API routes
+├── run.py                      # Entry point script
+├── config.py                   # Configuration management
+├── .env                        # Environment variables (create from .env.example)
+├── .env.example                # Environment template
+├── services/                   # Service layer
+│   ├── __init__.py
+│   ├── databricks_service.py  # Databricks SQL queries
+│   ├── model_service.py       # MLflow model loading/inference
+│   └── audio_processor.py     # Audio feature extraction (librosa)
+├── templates/                  # HTML templates (Jinja2)
+│   ├── base.html
+│   └── index.html
+└── static/                     # Frontend assets
+    ├── css/
+    │   └── style.css
+    ├── js/
+    │   └── main.js
+    └── uploads/                # Temporary upload storage
+```
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Render main UI |
+| `/api/tracks` | GET | Get all tracks with cluster assignments |
+| `/api/tracks/<id>` | GET | Get single track by ID |
+| `/api/upload` | POST | Upload audio file for classification |
+| `/api/recommendations/<id>` | GET | Get similar tracks (same cluster) |
+| `/api/cluster-stats` | GET | Get cluster distribution statistics |
+| `/api/favorites` | GET/POST/DELETE | Manage favorite tracks |
+
+## Feature Extraction
+
+Audio features extracted (matching Databricks Silver notebook):
+
+1. **Tempo** - BPM (beats per minute)
+2. **MFCC** - 13 Mel-Frequency Cepstral Coefficients (means)
+3. **Spectral Centroid** - Mean spectral centroid (brightness)
+
+**Total: 15 features** → Normalized with StandardScaler → KMeans clustering (K=2)
+
+## Troubleshooting
+
+### Configuration Validation Error
+
+```bash
+python config.py
+```
+
+This will test if all environment variables are loaded correctly.
+
+### Databricks Connection Issues
+
+- Verify SQL Warehouse is **running** (not stopped)
+- Check token hasn't expired
+- Ensure network access to Databricks workspace
+- Test connection manually:
+
+```python
+from databricks import sql
+connection = sql.connect(
+    server_hostname="your-workspace.cloud.databricks.com",
+    http_path="/sql/1.0/warehouses/your-id",
+    access_token="your-token"
+)
+cursor = connection.cursor()
+cursor.execute("SELECT 1")
+print(cursor.fetchone())
+```
+
+### MLflow Model Loading Issues
+
+- Check if model exists in MLflow registry
+- Verify model URI in `.env` is correct
+- Try alternative URIs:
+  - `models:/model_name/Production` (registered model)
+  - `runs:/run-id/artifact-path` (specific run)
+  - `models:/model_name/1` (specific version)
+
+### Audio Processing Errors
+
+- Ensure `librosa` and `soundfile` are installed correctly
+- Check audio file format (supports: mp3, wav, ogg)
+- Verify file size is under 50MB
+
+### S3 Access Issues
+
+- Check AWS credentials are correct
+- Verify S3 bucket name matches
+- Ensure bucket region matches `AWS_REGION`
+- Test S3 access:
+
+```python
+import boto3
+s3 = boto3.client('s3', region_name='us-east-1')
+s3.list_objects_v2(Bucket='your-bucket', MaxKeys=1)
+```
+
+## Development
+
+### Running Tests
+
+```bash
+# Test configuration
+python config.py
+
+# Test Databricks connection
+python -c "from services.databricks_service import DatabricksService; from config import config; db = DatabricksService(config); db.connect(); print('✓ Connected')"
+
+# Test audio processing
+python -c "from services.audio_processor import AudioProcessor; from config import config; ap = AudioProcessor(config); print('✓ Audio processor ready')"
+```
+
+### Debug Mode
+
+Set in `.env`:
+```env
+FLASK_DEBUG=True
+```
+
+This enables:
+- Auto-reload on code changes
+- Detailed error pages
+- Interactive debugger
+
+## License
+
+MIT License
+
+## Support
+
+For issues related to:
+- **Databricks integration**: Check Databricks SQL Connector docs
+- **MLflow models**: Check MLflow documentation
+- **Audio processing**: Check librosa documentation
+- **Flask app**: Check Flask documentation
