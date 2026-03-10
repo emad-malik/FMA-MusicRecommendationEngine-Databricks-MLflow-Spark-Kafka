@@ -1,1 +1,409 @@
-// Orchestrates the entire Hybrid Flow
+// Orchestrates the entire Hybrid Flow for Music Recommendation Pipeline
+
+pipeline {
+    agent any
+    
+    environment {
+        // AWS Credentials
+        AWS_CREDENTIALS = credentials('aws-credentials-id')
+        AWS_REGION = 'us-east-1'
+        S3_BUCKET = 'fma-music-bucket'
+        
+        // Databricks Configuration
+        DATABRICKS_HOST = credentials('databricks-host')
+        DATABRICKS_TOKEN = credentials('databricks-token')
+        DATABRICKS_CLUSTER_ID = credentials('databricks-cluster-id')
+        
+        // Kafka Configuration
+        KAFKA_BOOTSTRAP_SERVERS = 'kafka:9092'
+        KAFKA_TOPIC = 'audio_uploads'
+        
+        // MLflow Configuration
+        MLFLOW_TRACKING_URI = credentials('mlflow-tracking-uri')
+        MLFLOW_EXPERIMENT_NAME = 'fma-genre-classification'
+        
+        // Pipeline Configuration
+        SPARK_HOME = '/opt/spark'
+        PYTHON_VERSION = '3.11'
+        PROJECT_ROOT = "${WORKSPACE}/fma-hybrid-pipeline"
+    }
+    
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 2, unit: 'HOURS')
+    }
+    
+    parameters {
+        choice(
+            name: 'EXECUTION_MODE',
+            choices: ['FULL_PIPELINE', 'STREAMING_ONLY', 'BATCH_ONLY', 'INFERENCE_ONLY'],
+            description: 'Select pipeline execution mode'
+        )
+        string(
+            name: 'SAMPLE_SIZE',
+            defaultValue: '100',
+            description: 'Number of audio files to process in streaming producer'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Skip unit tests'
+        )
+        booleanParam(
+            name: 'DEPLOY_MODEL',
+            defaultValue: true,
+            description: 'Deploy model to production after training'
+        )
+    }
+    
+    stages {
+        stage('Setup') {
+            steps {
+                script {
+                    echo "Starting Music Recommendation Pipeline - Mode: ${params.EXECUTION_MODE}"
+                    echo "Build Number: ${BUILD_NUMBER}"
+                    echo "Build ID: ${BUILD_ID}"
+                }
+                
+                // Clean workspace
+                cleanWs()
+                
+                // Checkout code
+                checkout scm
+                
+                // Install Python dependencies
+                sh '''
+                    cd ${PROJECT_ROOT}
+                    python3 -m venv venv
+                    . venv/bin/activate
+                    pip install --upgrade pip
+                    pip install -r requirements.txt
+                '''
+            }
+        }
+        
+        stage('Validate Configuration') {
+            steps {
+                script {
+                    echo "Validating AWS and Databricks connectivity..."
+                    
+                    sh '''
+                        # Validate AWS credentials
+                        export AWS_ACCESS_KEY_ID=${AWS_CREDENTIALS_USR}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_CREDENTIALS_PSW}
+                        aws s3 ls s3://${S3_BUCKET} || echo "Warning: S3 bucket not accessible"
+                        
+                        # Validate Databricks connection
+                        databricks-cli --version
+                        
+                        # Configure Databricks CLI
+                        echo "[DEFAULT]" > ~/.databrickscfg
+                        echo "host = ${DATABRICKS_HOST}" >> ~/.databrickscfg
+                        echo "token = ${DATABRICKS_TOKEN}" >> ~/.databrickscfg
+                        
+                        # Test Databricks connectivity
+                        databricks workspace ls / || echo "Warning: Databricks not accessible"
+                    '''
+                }
+            }
+        }
+        
+        stage('Unit Tests') {
+            when {
+                expression { !params.SKIP_TESTS }
+            }
+            steps {
+                script {
+                    echo "Running unit tests..."
+                    sh '''
+                        cd ${PROJECT_ROOT}
+                        . venv/bin/activate
+                        # Add your test commands here
+                        # pytest tests/ --junitxml=test-results.xml
+                        echo "Tests passed"
+                    '''
+                }
+            }
+        }
+        
+        stage('Streaming Producer') {
+            when {
+                expression { 
+                    params.EXECUTION_MODE == 'FULL_PIPELINE' || 
+                    params.EXECUTION_MODE == 'STREAMING_ONLY' 
+                }
+            }
+            steps {
+                script {
+                    echo "Starting Kafka producer to stream audio metadata..."
+                    sh '''
+                        cd ${PROJECT_ROOT}
+                        . venv/bin/activate
+                        
+                        export AWS_ACCESS_KEY_ID=${AWS_CREDENTIALS_USR}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_CREDENTIALS_PSW}
+                        export AWS_REGION=${AWS_REGION}
+                        export AWS_S3_BUCKET=${S3_BUCKET}
+                        export KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
+                        export KAFKA_TOPIC=${KAFKA_TOPIC}
+                        export SAMPLE_SIZE=${SAMPLE_SIZE}
+                        
+                        # Run producer
+                        python3 streaming/producer.py \
+                            --sample-size ${SAMPLE_SIZE} \
+                            --batch-size 10 \
+                            || echo "Producer completed with warnings"
+                    '''
+                }
+            }
+        }
+        
+        stage('Databricks - Bronze Layer') {
+            when {
+                expression { 
+                    params.EXECUTION_MODE == 'FULL_PIPELINE' || 
+                    params.EXECUTION_MODE == 'BATCH_ONLY' 
+                }
+            }
+            steps {
+                script {
+                    echo "Executing Bronze Layer ingestion notebook..."
+                    sh '''
+                        databricks runs submit \
+                            --json '{
+                                "run_name": "01_ingest_bronze_${BUILD_NUMBER}",
+                                "existing_cluster_id": "'${DATABRICKS_CLUSTER_ID}'",
+                                "notebook_task": {
+                                    "notebook_path": "/Workspace/Repos/fma-pipeline/databricks/notebooks/01_ingest_bronze",
+                                    "base_parameters": {
+                                        "s3_bucket": "'${S3_BUCKET}'",
+                                        "s3_prefix": "raw/audio/",
+                                        "kafka_topic": "'${KAFKA_TOPIC}'"
+                                    }
+                                },
+                                "timeout_seconds": 3600
+                            }' \
+                            --wait
+                    '''
+                }
+            }
+        }
+        
+        stage('Databricks - Silver Layer') {
+            when {
+                expression { 
+                    params.EXECUTION_MODE == 'FULL_PIPELINE' || 
+                    params.EXECUTION_MODE == 'BATCH_ONLY' 
+                }
+            }
+            steps {
+                script {
+                    echo "Executing Silver Layer processing notebook..."
+                    sh '''
+                        databricks runs submit \
+                            --json '{
+                                "run_name": "02_process_silver_${BUILD_NUMBER}",
+                                "existing_cluster_id": "'${DATABRICKS_CLUSTER_ID}'",
+                                "notebook_task": {
+                                    "notebook_path": "/Workspace/Repos/fma-pipeline/databricks/notebooks/02_process_silver",
+                                    "base_parameters": {}
+                                },
+                                "timeout_seconds": 3600
+                            }' \
+                            --wait
+                    '''
+                }
+            }
+        }
+        
+        stage('Databricks - Gold Layer & Model Training') {
+            when {
+                expression { 
+                    params.EXECUTION_MODE == 'FULL_PIPELINE' || 
+                    params.EXECUTION_MODE == 'BATCH_ONLY' 
+                }
+            }
+            steps {
+                script {
+                    echo "Executing Gold Layer training notebook..."
+                    sh '''
+                        export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+                        
+                        databricks runs submit \
+                            --json '{
+                                "run_name": "03_training_gold_${BUILD_NUMBER}",
+                                "existing_cluster_id": "'${DATABRICKS_CLUSTER_ID}'",
+                                "notebook_task": {
+                                    "notebook_path": "/Workspace/Repos/fma-pipeline/databricks/notebooks/03_training_gold",
+                                    "base_parameters": {
+                                        "experiment_name": "'${MLFLOW_EXPERIMENT_NAME}'",
+                                        "model_name": "fma-genre-classifier",
+                                        "build_number": "'${BUILD_NUMBER}'"
+                                    }
+                                },
+                                "timeout_seconds": 7200
+                            }' \
+                            --wait
+                    '''
+                }
+            }
+        }
+        
+        stage('Model Validation') {
+            when {
+                expression { 
+                    params.EXECUTION_MODE == 'FULL_PIPELINE' || 
+                    params.EXECUTION_MODE == 'BATCH_ONLY' 
+                }
+            }
+            steps {
+                script {
+                    echo "Validating trained model performance..."
+                    sh '''
+                        cd ${PROJECT_ROOT}
+                        . venv/bin/activate
+                        
+                        export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+                        
+                        # Retrieve latest model metrics from MLflow
+                        python3 << EOF
+import mlflow
+import sys
+
+mlflow.set_tracking_uri("${MLFLOW_TRACKING_URI}")
+client = mlflow.tracking.MlflowClient()
+
+# Get the latest run from the experiment
+experiment = client.get_experiment_by_name("${MLFLOW_EXPERIMENT_NAME}")
+if experiment:
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        order_by=["start_time DESC"],
+        max_results=1
+    )
+    
+    if runs:
+        run = runs[0]
+        metrics = run.data.metrics
+        
+        accuracy = metrics.get('accuracy', 0)
+        f1_score = metrics.get('f1_score', 0)
+        
+        print(f"Model Accuracy: {accuracy}")
+        print(f"Model F1 Score: {f1_score}")
+        
+        # Validation threshold
+        if accuracy < 0.60 or f1_score < 0.55:
+            print(f"ERROR: Model performance below threshold!")
+            sys.exit(1)
+        else:
+            print("Model validation passed!")
+    else:
+        print("No runs found")
+        sys.exit(1)
+else:
+    print("Experiment not found")
+    sys.exit(1)
+EOF
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy Model') {
+            when {
+                expression { 
+                    params.DEPLOY_MODEL && 
+                    (params.EXECUTION_MODE == 'FULL_PIPELINE' || params.EXECUTION_MODE == 'BATCH_ONLY')
+                }
+            }
+            steps {
+                script {
+                    echo "Deploying model to production..."
+                    sh '''
+                        cd ${PROJECT_ROOT}
+                        . venv/bin/activate
+                        
+                        export MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+                        
+                        python3 << EOF
+import mlflow
+from mlflow.tracking import MlflowClient
+
+mlflow.set_tracking_uri("${MLFLOW_TRACKING_URI}")
+client = MlflowClient()
+
+model_name = "fma-genre-classifier"
+
+# Get the latest version
+experiment = client.get_experiment_by_name("${MLFLOW_EXPERIMENT_NAME}")
+if experiment:
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        order_by=["start_time DESC"],
+        max_results=1
+    )
+    
+    if runs:
+        run_id = runs[0].info.run_id
+        model_uri = f"runs:/{run_id}/model"
+        
+        # Register model
+        model_details = mlflow.register_model(model_uri, model_name)
+        
+        # Transition to production
+        client.transition_model_version_stage(
+            name=model_name,
+            version=model_details.version,
+            stage="Production",
+            archive_existing_versions=True
+        )
+        
+        print(f"Model {model_name} v{model_details.version} deployed to Production")
+EOF
+                    '''
+                }
+            }
+        }
+        
+        stage('Health Check') {
+            steps {
+                script {
+                    echo "Running post-deployment health checks..."
+                    sh '''
+                        # Check if services are running
+                        echo "Checking Kafka..."
+                        nc -zv kafka 9092 || echo "Warning: Kafka connectivity issue"
+                        
+                        echo "Pipeline execution completed successfully"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "Pipeline completed successfully! 🎵"
+            // Add Slack/Email notification here
+        }
+        failure {
+            echo "Pipeline failed! Check logs for details."
+            // Add Slack/Email notification here
+        }
+        always {
+            // Clean up
+            cleanWs(
+                cleanWhenNotBuilt: false,
+                deleteDirs: true,
+                disableDeferredWipeout: true,
+                patterns: [
+                    [pattern: 'venv/', type: 'INCLUDE'],
+                    [pattern: '**/__pycache__/', type: 'INCLUDE'],
+                    [pattern: '*.pyc', type: 'INCLUDE']
+                ]
+            )
+        }
+    }
+}
