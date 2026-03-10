@@ -55,5 +55,4 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# Data (optional - uncomment if not tracking large datasets)
 data/

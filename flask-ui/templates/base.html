@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Music Recommendation System{% endblock %}</title>
+    
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="container">
+            <div class="nav-brand">
+                <i class="fas fa-music"></i>
+                <span>Music Recommender</span>
+            </div>
+            <div class="nav-links">
+                <a href="/" class="nav-link {% if request.endpoint == 'index' %}active{% endif %}">
+                    <i class="fas fa-home"></i> Home
+                </a>
+                <a href="javascript:void(0)" onclick="showFavorites()" class="nav-link">
+                    <i class="fas fa-heart"></i> Favorites <span id="favorites-count" class="badge">0</span>
+                </a>
+                <a href="javascript:void(0)" onclick="showStats()" class="nav-link">
+                    <i class="fas fa-chart-bar"></i> Stats
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <div class="container">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <i class="fas fa-check-circle"></i>
+        <span id="toast-message">Message</span>
+    </div>
+
+    <!-- Music Player Modal -->
+    <div id="player-modal" class="modal">
+        <div class="modal-content player-content">
+            <span class="close" onclick="closePlayer()">&times;</span>
+            <div class="player-header">
+                <i class="fas fa-play-circle"></i>
+                <h3 id="player-track-name">Track Name</h3>
+            </div>
+            <div class="player-body">
+                <audio id="audio-player" controls>
+                    Your browser does not support the audio element.
+                </audio>
+                <div class="player-info">
+                    <p><strong>Track ID:</strong> <span id="player-track-id"></span></p>
+                    <p><strong>Cluster:</strong> <span id="player-cluster-id"></span></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recommendations Modal -->
+    <div id="recommendations-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeRecommendations()">&times;</span>
+            <div class="modal-header">
+                <i class="fas fa-list-ul"></i>
+                <h2>Similar Tracks</h2>
+            </div>
+            <div id="recommendations-content" class="modal-body">
+                <!-- Recommendations will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Favorites Modal -->
+    <div id="favorites-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeFavorites()">&times;</span>
+            <div class="modal-header">
+                <i class="fas fa-heart"></i>
+                <h2>My Favorites</h2>
+            </div>
+            <div id="favorites-content" class="modal-body">
+                <!-- Favorites will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats Modal -->
+    <div id="stats-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeStats()">&times;</span>
+            <div class="modal-header">
+                <i class="fas fa-chart-bar"></i>
+                <h2>Cluster Statistics</h2>
+            </div>
+            <div id="stats-content" class="modal-body">
+                <!-- Stats will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom JavaScript -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

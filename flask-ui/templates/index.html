@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+
+{% block title %}Music Recommendation System - Home{% endblock %}
+
+{% block content %}
+<div class="hero-section">
+    <h1 class="hero-title">
+        <i class="fas fa-music"></i>
+        Discover Your Next Favorite Track
+    </h1>
+    <p class="hero-subtitle">Upload your music and get AI-powered recommendations based on audio features</p>
+</div>
+
+<!-- Upload Section -->
+<section class="card upload-section">
+    <div class="card-header">
+        <i class="fas fa-cloud-upload-alt"></i>
+        <h2>Upload Track</h2>
+    </div>
+    <div class="card-body">
+        <form id="upload-form" enctype="multipart/form-data">
+            <div class="upload-area" id="upload-area">
+                <i class="fas fa-file-audio upload-icon"></i>
+                <p class="upload-text">Drag & drop your audio file here</p>
+                <p class="upload-subtext">or</p>
+                <label for="file-input" class="btn btn-primary">
+                    <i class="fas fa-folder-open"></i> Browse Files
+                </label>
+                <input type="file" id="file-input" name="file" accept=".mp3,.wav,.ogg" hidden>
+                <p class="upload-hint">Supported formats: MP3, WAV, OGG (Max 50MB)</p>
+            </div>
+            <div id="file-info" class="file-info" style="display: none;">
+                <i class="fas fa-file-audio"></i>
+                <span id="file-name"></span>
+                <button type="button" class="btn-icon" onclick="clearFile()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <button type="submit" id="upload-btn" class="btn btn-success btn-large" style="display: none;">
+                <i class="fas fa-upload"></i> Upload & Analyze
+            </button>
+        </form>
+        <div id="upload-progress" class="progress-container" style="display: none;">
+            <div class="progress-bar">
+                <div class="progress-fill"></div>
+            </div>
+            <p class="progress-text">Processing your track...</p>
+        </div>
+        <div id="upload-result" class="upload-result" style="display: none;"></div>
+    </div>
+</section>
+
+<!-- Filter and Search Section -->
+<section class="filter-section">
+    <div class="filter-controls">
+        <div class="search-box">
+            <i class="fas fa-search"></i>
+            <input type="text" id="search-input" placeholder="Search tracks..." onkeyup="filterTracks()">
+        </div>
+        <div class="filter-group">
+            <label for="cluster-filter">Filter by Cluster:</label>
+            <select id="cluster-filter" onchange="filterTracks()">
+                <option value="all">All Clusters</option>
+                <option value="0">Cluster 0</option>
+                <option value="1">Cluster 1</option>
+            </select>
+        </div>
+        <button class="btn btn-secondary" onclick="loadTracks()">
+            <i class="fas fa-sync-alt"></i> Refresh
+        </button>
+    </div>
+</section>
+
+<!-- Tracks Library -->
+<section class="card">
+    <div class="card-header">
+        <i class="fas fa-compact-disc"></i>
+        <h2>Music Library</h2>
+        <span id="tracks-count" class="badge">0</span>
+    </div>
+    <div class="card-body">
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <p>Loading tracks from S3...</p>
+        </div>
+        <div id="tracks-container" class="tracks-grid" style="display: none;">
+            <!-- Tracks will be loaded here dynamically -->
+        </div>
+        <div id="no-tracks" class="empty-state" style="display: none;">
+            <i class="fas fa-folder-open"></i>
+            <p>No tracks found</p>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Load tracks on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadTracks();
+    loadFavoritesCount();
+    setupUploadArea();
+});
+
+// Setup drag and drop for upload area
+function setupUploadArea() {
+    const uploadArea = document.getElementById('upload-area');
+    const fileInput = document.getElementById('file-input');
+    
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        uploadArea.addEventListener(eventName, preventDefaults, false);
+    });
+    
+    function preventDefaults(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+    
+    ['dragenter', 'dragover'].forEach(eventName => {
+        uploadArea.addEventListener(eventName, () => {
+            uploadArea.classList.add('drag-over');
+        });
+    });
+    
+    ['dragleave', 'drop'].forEach(eventName => {
+        uploadArea.addEventListener(eventName, () => {
+            uploadArea.classList.remove('drag-over');
+        });
+    });
+    
+    uploadArea.addEventListener('drop', function(e) {
+        const dt = e.dataTransfer;
+        const files = dt.files;
+        if (files.length > 0) {
+            fileInput.files = files;
+            handleFileSelect();
+        }
+    });
+    
+    fileInput.addEventListener('change', handleFileSelect);
+}
+
+function handleFileSelect() {
+    const fileInput = document.getElementById('file-input');
+    const fileInfo = document.getElementById('file-info');
+    const fileName = document.getElementById('file-name');
+    const uploadBtn = document.getElementById('upload-btn');
+    const uploadArea = document.getElementById('upload-area');
+    
+    if (fileInput.files.length > 0) {
+        fileName.textContent = fileInput.files[0].name;
+        uploadArea.style.display = 'none';
+        fileInfo.style.display = 'flex';
+        uploadBtn.style.display = 'block';
+    }
+}
+
+function clearFile() {
+    const fileInput = document.getElementById('file-input');
+    const fileInfo = document.getElementById('file-info');
+    const uploadBtn = document.getElementById('upload-btn');
+    const uploadArea = document.getElementById('upload-area');
+    
+    fileInput.value = '';
+    fileInfo.style.display = 'none';
+    uploadBtn.style.display = 'none';
+    uploadArea.style.display = 'flex';
+}
+
+// Handle upload form submission
+document.getElementById('upload-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const fileInput = document.getElementById('file-input');
+    const uploadProgress = document.getElementById('upload-progress');
+    const uploadResult = document.getElementById('upload-result');
+    const uploadBtn = document.getElementById('upload-btn');
+    
+    if (fileInput.files.length === 0) {
+        showToast('Please select a file', 'error');
+        return;
+    }
+    
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    
+    uploadBtn.disabled = true;
+    uploadProgress.style.display = 'block';
+    uploadResult.style.display = 'none';
+    
+    try {
+        const response = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        uploadProgress.style.display = 'none';
+        uploadResult.style.display = 'block';
+        
+        if (data.success) {
+            uploadResult.innerHTML = `
+                <div class="alert alert-success">
+                    <i class="fas fa-check-circle"></i>
+                    <div>
+                        <strong>Success!</strong> ${data.message}
+                        <p>Cluster: ${data.track.cluster_id} | Track ID: ${data.track.track_id}</p>
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="showRecommendationsForTrack('${data.track.track_id}')">
+                    <i class="fas fa-list-ul"></i> View Recommendations
+                </button>
+            `;
+            clearFile();
+        } else {
+            uploadResult.innerHTML = `
+                <div class="alert alert-error">
+                    <i class="fas fa-exclamation-circle"></i>
+                    <div>
+                        <strong>Error!</strong> ${data.error}
+                    </div>
+                </div>
+            `;
+        }
+    } catch (error) {
+        uploadProgress.style.display = 'none';
+        uploadResult.style.display = 'block';
+        uploadResult.innerHTML = `
+            <div class="alert alert-error">
+                <i class="fas fa-exclamation-circle"></i>
+                <div>
+                    <strong>Error!</strong> Network error occurred
+                </div>
+            </div>
+        `;
+    }
+    
+    uploadBtn.disabled = false;
+});
+
+function showRecommendationsForTrack(trackId) {
+    showRecommendations(trackId);
+}
+</script>
+{% endblock %}
